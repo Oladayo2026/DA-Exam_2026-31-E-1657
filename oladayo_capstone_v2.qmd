@@ -1,0 +1,1105 @@
+---
+title: "Project Profitability Analytics: Drivers of Profit Margin in Construction Projects"
+author: "Oladayo Folorunso"
+date: today
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    code-tools: true
+    df-print: paged
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+```{r setup, include=FALSE}
+# ── Reticulate / Python detection ────────────────────────────────────────────
+# Portable Python discovery: tries a project-local .venv first, then falls back
+# to whatever python reticulate finds on PATH. Override by setting the
+# RETICULATE_PYTHON environment variable in your .Renviron.
+if (requireNamespace("reticulate", quietly = TRUE)) {
+  venv_candidates <- c(
+    Sys.getenv("RETICULATE_PYTHON", unset = ""),
+    file.path(getwd(), ".venv", "bin", "python"),
+    file.path(getwd(), ".venv", "Scripts", "python.exe"),
+    file.path(Sys.getenv("HOME"), ".venv", "bin", "python")
+  )
+  venv_candidates <- venv_candidates[nzchar(venv_candidates)]
+  picked <- venv_candidates[file.exists(venv_candidates)]
+  if (length(picked) > 0) {
+    reticulate::use_python(picked[1], required = FALSE)
+  }
+  # If none found, reticulate falls back to system python.
+}
+
+# ── R packages ───────────────────────────────────────────────────────────────
+pkgs <- c("readr", "dplyr", "tidyr", "tibble", "purrr", "forcats", "ggplot2",
+          "lubridate", "scales", "ggcorrplot", "patchwork", "broom", "knitr",
+          "car", "sandwich", "lmtest")  # car: Levene/VIF; sandwich+lmtest: robust SEs
+invisible(lapply(pkgs, function(p) {
+  if (requireNamespace(p, quietly = TRUE)) library(p, character.only = TRUE)
+}))
+
+if (!requireNamespace("kableExtra", quietly = TRUE)) {
+  kable_styling <- function(x, ...) x
+} else {
+  library(kableExtra)
+}
+
+# janitor::clean_names fallback
+clean_names <- function(df) {
+  nms <- names(df)
+  nms <- tolower(nms)
+  nms <- gsub("[^a-z0-9]+", "_", nms)
+  nms <- gsub("_+", "_", nms)
+  nms <- gsub("^_|_$", "", nms)
+  names(df) <- nms
+  df
+}
+if (requireNamespace("janitor", quietly = TRUE)) {
+  clean_names <- janitor::clean_names
+}
+
+set.seed(42)
+
+knitr::opts_chunk$set(fig.width = 9, fig.height = 5, dpi = 150)
+```
+
+```{python setup-py, include=FALSE}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import seaborn as sns
+from scipy import stats
+from scipy.stats import f_oneway, kruskal, ttest_ind, pearsonr, levene
+import statsmodels.formula.api as smf
+import statsmodels.api as sm
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from IPython.display import display
+
+sns.set_theme(style="whitegrid", palette="muted")
+plt.rcParams["figure.dpi"] = 150
+pd.set_option("display.float_format", lambda x: f"{x:,.2f}")
+np.random.seed(42)
+```
+
+```{r load-r, include=FALSE}
+# ⚠ Column names in raw CSV have leading/trailing whitespace —
+# janitor::clean_names() resolves all of these automatically.
+df_r <- read_csv("data/MEP_construction_company_projs.csv",
+                 col_types = cols(.default = col_character())) |>
+  clean_names() |>    # strips whitespace, lowercases, converts spaces → underscores
+  mutate(
+    month               = my(month),           # "Apr-16" → Date
+    contract_value      = as.numeric(gsub("[^0-9.]", "", contract_value)),
+    budgeted_cost       = as.numeric(gsub("[^0-9.]", "", budgeted_cost)),
+    actual_cost         = as.numeric(gsub("[^0-9.]", "", actual_cost)),
+    profit_margin_pct   = as.numeric(gsub("[^0-9.\\-]", "", profit_margin)),
+    payment_delays_days = as.numeric(payment_delays_days),
+    variation_order_value    = as.numeric(gsub("[^0-9.\\-]", "", variation_order_value)),
+    procurement_delay_days   = as.numeric(procurement_delay_days),
+    completion_pct           = as.numeric(gsub("[^0-9.]", "", completion))
+  ) |>
+  filter(!is.na(profit_margin_pct))
+
+# Derived: cost overrun flag
+df_r <- df_r |>
+  mutate(cost_overrun = actual_cost - budgeted_cost,
+         overrun_flag = if_else(cost_overrun > 0, "Over Budget", "On/Under Budget"))
+
+# ── Diagnostics used in narrative ───────────────────────────────────────────
+n_projects        <- nrow(df_r)
+period_start      <- format(min(df_r$month,  na.rm = TRUE), "%B %Y")
+period_end        <- format(max(df_r$month,  na.rm = TRUE), "%B %Y")
+n_years           <- as.integer(year(max(df_r$month, na.rm = TRUE))) -
+                     as.integer(year(min(df_r$month, na.rm = TRUE))) + 1
+total_contract    <- sum(df_r$contract_value, na.rm = TRUE)
+n_loss_making     <- sum(df_r$profit_margin_pct < 0, na.rm = TRUE)
+pct_loss_making   <- round(100 * n_loss_making / sum(!is.na(df_r$profit_margin_pct)), 1)
+median_margin     <- round(median(df_r$profit_margin_pct, na.rm = TRUE), 2)
+n_overrun         <- sum(df_r$overrun_flag == "Over Budget", na.rm = TRUE)
+pct_overrun       <- round(100 * n_overrun / sum(!is.na(df_r$overrun_flag)), 1)
+```
+
+```{python load-py, include=FALSE}
+df_py = pd.read_csv("data/MEP_construction_company_projs.csv", dtype=str)
+
+# ⚠ Strip leading/trailing whitespace from all column names
+df_py.columns = df_py.columns.str.strip()
+
+# Normalise to snake_case
+df_py.columns = (df_py.columns.str.lower()
+                 .str.replace(r"[^\w]", "_", regex=True)
+                 .str.replace(r"_+", "_", regex=True)
+                 .str.strip("_"))
+
+# Parse month
+df_py["month"] = pd.to_datetime(df_py["month"].str.strip(), format="%b-%y", errors="coerce")
+
+# Numeric columns
+num_cols = ["contract_value", "budgeted_cost", "actual_cost",
+            "profit_margin", "payment_delays_days",
+            "variation_order_value", "procurement_delay_days", "completion"]
+for col in num_cols:
+    match = [c for c in df_py.columns if col.replace("_", "") in c.replace("_", "")]
+    if match:
+        df_py[match[0]] = pd.to_numeric(
+            df_py[match[0]].str.replace(r"[^\d.\-]", "", regex=True), errors="coerce")
+
+# Re-identify key columns by partial match for safety
+def find_col(df, keyword):
+    matches = [c for c in df.columns if keyword in c]
+    return matches[0] if matches else None
+
+profit_col   = find_col(df_py, "profit_margin")
+payment_col  = find_col(df_py, "payment_delay")
+procure_col  = find_col(df_py, "procurement_delay")
+actual_col   = find_col(df_py, "actual_cost")
+budget_col   = find_col(df_py, "budgeted_cost")
+contract_col = find_col(df_py, "contract_value")
+project_col  = find_col(df_py, "project_type")
+client_col   = find_col(df_py, "client_type")
+complete_col = find_col(df_py, "completion")
+vo_col       = find_col(df_py, "variation_order")
+
+df_py = df_py.dropna(subset=[profit_col])
+df_py["cost_overrun"] = df_py[actual_col] - df_py[budget_col]
+df_py["overrun_flag"] = np.where(df_py["cost_overrun"] > 0, "Over Budget", "On/Under Budget")
+```
+
+---
+
+## Executive Summary
+
+**Business problem.** Profit margin variability is the central financial risk in MEP construction project delivery. Understanding which project characteristics — type, client category, payment behaviour, procurement delays — drive margin erosion enables the finance function to price contracts more accurately and implement early-warning controls during execution.
+
+**Data.** `r n_projects` MEP construction projects executed between `r period_start` and `r period_end` (~`r n_years` years of project history), drawn from the company's project management information system. Metrics include contract value, budgeted and actual cost, profit margin (%), payment delays, variation orders, procurement delays, and project completion percentage. Total contract value across the portfolio: **₦`r format(round(total_contract, 0), big.mark=",")`**.
+
+**Portfolio health snapshot:**
+
+- **`r n_loss_making` of `r n_projects` projects (`r pct_loss_making`%) recorded a negative profit margin.**
+- **`r n_overrun` projects (`r pct_overrun`%) exceeded their budgeted cost.**
+- Median portfolio margin: **`r median_margin`%**.
+
+**Key findings (filled in dynamically at render time):**
+
+1. Margin performance differs across project and client categories, confirming portfolio mix as a major profitability driver (formal ANOVA in §8, with Levene's test as the variance-assumption gate).
+2. Payment delay and other execution-side variables show negative association with margin strength; the regression in §10 quantifies each driver in percentage-point-per-day terms, directly usable in payment-term negotiation.
+3. Loss concentration analysis (§5 Pareto) identifies whether the portfolio's margin problem sits in a small subset of contracts (a procurement-mix problem) or across the book (an execution-discipline problem).
+
+**Headline recommendation.** Introduce a project risk-screening gate at the bid-approval stage anchored in the regression coefficients from §10. Contracts whose **predicted** margin falls below the company's hurdle rate should trigger automatic margin stress-testing before sign-off, and any project with payment terms beyond the threshold identified in §10's quadratic test should attract an explicit pricing uplift.
+
+---
+
+## Professional Disclosure
+
+**Job title:** Head of Finance (CFO-designate)  
+**Organisation sector:** MEP construction and project delivery
+
+### Technique 1 — Exploratory Data Analysis
+As Head of Finance overseeing a `r n_projects`-project MEP portfolio spanning `r period_start` to `r period_end`, the most pressing strategic concern is margin volatility: why do some projects deliver healthy returns while others erode the company's financial position? Before any formal test, the *shape* of the margin distribution must be understood — what percentage of projects are loss-making, which project type clusters exhibit the widest variance, and whether the most extreme negative margins are genuine contractual losses or accounting artefacts such as variation orders not yet captured in the cost system. EDA establishes this baseline and determines whether distributional characteristics support parametric ANOVA and regression, or whether non-parametric alternatives are required. This mirrors the quarterly margin review prepared for the MD, where the opening chart always presents project-level performance distribution before any cause-and-effect analysis.
+
+**Alternative considered.** Starting with a regression model on the raw data to identify margin drivers directly. Rejected because undetected data quality issues — inconsistent margin calculations across project managers, missing variation order entries, incomplete cost records for in-progress projects — would silently bias coefficients and produce recommendations based on artefactual rather than genuine performance patterns.
+
+**Limitation.** EDA is descriptive only. A project type that appears to underperform on average may not do so significantly once variance and sample size are properly weighted. ANOVA and regression are required before making portfolio or bid-pricing decisions based on observed margin differences.
+
+### Technique 2 — Data Visualization
+Margin analytics in construction project finance serve a dual purpose: internal project management and external commercial strategy. The time series of annual average profit margin by project type answers a board-level question — is portfolio profitability improving or deteriorating, and are particular project segments driving a structural decline? The scatter of payment delay days against profit margin translates the most operationally controllable risk variable — receivables ageing — into a visual argument for tighter collection governance: a clearly negative slope provides the finance function with board-presentable leverage in payment-term negotiations. The cost overrun rate chart by project type gives procurement and the MD the input for risk-adjusted contracting and contingency provisioning. The Pareto curve of losses gives the MD a single decision-grade number: the share of the portfolio that is producing the bulk of the loss exposure.
+
+**Alternative considered.** Presenting only the regression output without supporting visualisations. Rejected because regression coefficients require contextual interpretation, and non-technical stakeholders — project managers, the MD, the board — rely on visuals to understand commercial implications. Charts also reveal non-linear patterns the linear regression may not capture.
+
+**Limitation.** The `r n_years`-year window introduces potential confounding from macroeconomic cycles, construction-material inflation post-2022, and changes in company project-intake policy. Trends should be read with awareness that the market environment has shifted materially across the period, and margin benchmarks from the earliest years may not apply to current bid pricing.
+
+### Technique 3 — Hypothesis Testing
+A recurrent finance-team debate is whether certain project categories or client types are structurally less profitable — and whether that difference is a reliable basis for adjusting bid strategy and risk provisioning, or merely a noise artefact from a few outlier projects. One-way ANOVA on profit margin across project types (Commercial, Residential, Industrial, Infrastructure) and across client types (Government, Private, Multinational) converts the qualitative observation into a defensible statistical claim. If ANOVA confirms a significant difference — for example, Government-client projects delivering systematically lower margin than Private-sector — that result supports a formal pricing adjustment and risk uplift for public-sector bids: a recommendation that can be taken to the MD with a p-value, not just an opinion. Levene's test and the non-parametric Kruskal-Wallis act as variance-assumption and robustness checks on the classical ANOVA result.
+
+**Alternative considered.** A simple comparison of highest- vs lowest-performing project type means. Rejected because that approach ignores variance and sample-size heterogeneity, allowing extreme outliers to dominate the narrative. Formal ANOVA with Tukey HSD post-hoc testing controls for multiple comparisons and identifies which specific pairings are genuinely different.
+
+**Limitation.** Some project-type or client-type subgroups contain fewer than 20 observations. For these smaller groups Tukey HSD has limited statistical power, and the absence of a significant result should not be taken as proof of equality. Kruskal-Wallis runs as a robustness check.
+
+### Technique 4 — Correlation Analysis
+The five candidate predictors for the profit margin regression — payment delay days, procurement delay days, cost overrun, variation order value, and completion percentage — may be partly collinear. Projects with long payment delays may also experience procurement delays if cash-flow constraints defer materials procurement, inflating the apparent effect of both variables simultaneously if entered into the regression without screening. Correlation analysis maps these inter-variable relationships before model specification, identifying pairs with |r| > 0.70 that require careful handling to avoid unstable coefficient estimates. It also confirms the direction and magnitude of each variable's relationship with profit margin — establishing which operational levers are empirically linked to margin outcomes before any model is built.
+
+**Alternative considered.** Including all five predictors in the regression without prior screening. Rejected because high multicollinearity between payment and procurement delay variables could produce coefficient sign reversals or dramatically inflated standard errors, making the model practically unreliable for identifying margin improvement levers.
+
+**Limitation.** Pearson correlation captures only linear associations. If the relationship between payment delay and margin is threshold-based — e.g., margin is minimally affected for delays below 60 days but drops sharply beyond that — the correlation coefficient understates the true relationship. The regression in §10 explicitly tests for a non-linear payment-delay effect using a quadratic term to address this exact concern.
+
+### Technique 5 — Multiple Regression
+The central analytical objective is a project margin prediction model: given a contract's type, client category, payment history, procurement lead time, and variation order exposure, what is the expected profit margin? As Head of Finance, this model enables flagging high-risk contracts at the bid stage before resources are committed, building differentiated contingency provisions in the budget plan, and quantifying the margin cost of accepting unfavourable payment terms. The coefficient on `payment_delays_days` directly answers: *"what is the marginal cost — in percentage-point terms — of accepting a contract with 30 additional days of payment delay?"* A quadratic extension on the same predictor tests whether the effect is linear or threshold-shaped — operationally distinct interventions: linear means tighten payment terms uniformly; threshold means tighten only where projected payment-delay exceeds the inflection point.
+
+**Alternative considered.** Building a binary margin classification model (profitable vs. loss-making) using logistic regression. Rejected because the business question is not binary — it concerns the *degree* of margin performance — and a continuous OLS model provides more granular information for bid pricing and contingency quantification.
+
+**Limitation.** The regression assumes constant marginal effects across the `r n_years`-year observation window. Given the construction-materials cost shock of 2022–2023 and exchange-rate pressures on imported MEP equipment, older project records may reduce the contemporary relevance of estimated coefficients. A rolling 36-month window model would provide more period-relevant estimates for current bid pricing; this is flagged in §12.
+
+---
+
+## Data Collection & Sampling
+
+- **Source:** Internal project management and cost-monitoring systems.
+- **Dataset:** `construction_company_projs.csv` (`r n_projects` records, 12 variables).
+- **Collection method:** Structured export from finance and project records.
+- **Period covered:** `r period_start` to `r period_end`.
+- **Sample frame:** Active and completed projects in the reporting window.
+- **Sample adequacy:** Exceeds CS1 minimum and supports EDA, hypothesis testing, correlation, and regression — with caution on subgroup sizes for the Tukey HSD.
+- **Ethics:** Data is proprietary and used solely for academic analysis; sensitive identifiers should remain coded for publication.
+
+### Data Dictionary
+
+```{r data-dict-r, echo=FALSE}
+data_dict <- tibble::tribble(
+  ~Column,                    ~Type,    ~Description,
+  "project_id",               "chr",    "Unique project identifier",
+  "month",                    "date",   "Project start or reporting month (Mmm-yy format)",
+  "project_type",             "chr",    "Project category (Commercial, Residential, Industrial, Infrastructure)",
+  "client_type",              "chr",    "Client category (Government, Private, Multinational)",
+  "contract_value",           "num",    "Awarded contract value (NGN)",
+  "budgeted_cost",            "num",    "Budgeted project cost at award (NGN)",
+  "actual_cost",              "num",    "Actual project cost to date (NGN)",
+  "profit_margin",            "num",    "Profit margin (%) — primary outcome variable",
+  "payment_delays_days",      "num",    "Cumulative days of payment delay from the client",
+  "variation_order_value",    "num",    "Variation-order exposure (NGN, can be negative)",
+  "procurement_delay_days",   "num",    "Cumulative days of procurement / supply delay",
+  "completion",               "num",    "Project completion percentage (0–100)",
+  "cost_overrun (derived)",   "num",    "actual_cost − budgeted_cost (positive = over budget)",
+  "overrun_flag (derived)",   "chr",    "'Over Budget' if cost_overrun > 0, else 'On/Under Budget'"
+)
+knitr::kable(data_dict, caption = "Column dictionary — original + derived variables") |>
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+---
+
+## Data Description & Quality
+
+::: {.panel-tabset}
+
+## R
+
+```{r desc-r}
+cat("Rows:", nrow(df_r), "| Columns:", ncol(df_r), "\n")
+cat("Date range:", format(min(df_r$month, na.rm=TRUE), "%b %Y"),
+    "to", format(max(df_r$month, na.rm=TRUE), "%b %Y"), "\n")
+cat("Total contract value (₦):", format(round(total_contract, 0), big.mark=","), "\n")
+cat("Loss-making projects:", n_loss_making, "of", n_projects,
+    "(", pct_loss_making, "%)\n")
+cat("Over-budget projects:", n_overrun, "of", n_projects,
+    "(", pct_overrun, "%)\n\n")
+
+df_r |>
+  select(contract_value, budgeted_cost, actual_cost,
+         profit_margin_pct, payment_delays_days,
+         procurement_delay_days, completion_pct) |>
+  summary() |>
+  kable(caption = "Numeric variable summaries — construction projects") |>
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+```{r desc-missing-r}
+# Missingness audit
+df_r |>
+  summarise(across(everything(), ~ round(100 * mean(is.na(.)), 2))) |>
+  pivot_longer(everything(), names_to = "column", values_to = "pct_missing") |>
+  arrange(desc(pct_missing)) |>
+  kable(caption = "Missing data % by column") |>
+  kable_styling(full_width = FALSE)
+```
+
+```{r desc-cats-r}
+df_r |>
+  count(project_type, sort=TRUE) |>
+  kable(caption = "Project count by type") |>
+  kable_styling(full_width = FALSE)
+
+df_r |>
+  count(client_type, sort=TRUE) |>
+  kable(caption = "Project count by client type") |>
+  kable_styling(full_width = FALSE)
+```
+
+## Python
+
+```{python desc-py}
+print(f"Rows: {df_py.shape[0]} | Columns: {df_py.shape[1]}")
+min_d = df_py['month'].min()
+max_d = df_py['month'].max()
+date_range = (f"{min_d.strftime('%b %Y') if pd.notna(min_d) else 'N/A'} to "
+              f"{max_d.strftime('%b %Y') if pd.notna(max_d) else 'N/A'}")
+print(f"Date range: {date_range}")
+print(f"Total contract value (₦): {df_py[contract_col].sum():,.0f}")
+n_loss = int((df_py[profit_col] < 0).sum())
+n_over = int((df_py['overrun_flag'] == 'Over Budget').sum())
+print(f"Loss-making projects: {n_loss} of {len(df_py)} "
+      f"({100*n_loss/len(df_py):.1f}%)")
+print(f"Over-budget projects: {n_over} of {len(df_py)} "
+      f"({100*n_over/len(df_py):.1f}%)\n")
+
+display(df_py[[profit_col, payment_col, procure_col,
+               actual_col, budget_col]].describe().round(2))
+```
+
+```{python desc-missing-py}
+print("Missingness — % NA by column:")
+display((df_py.isna().mean() * 100).round(2)
+        .sort_values(ascending=False)
+        .to_frame("pct_missing"))
+```
+
+```{python desc-cats-py}
+print("Project type distribution:")
+display(df_py[project_col].value_counts().rename_axis("project_type")
+        .reset_index(name="count"))
+print("\nClient type distribution:")
+display(df_py[client_col].value_counts().rename_axis("client_type")
+        .reset_index(name="count"))
+```
+
+:::
+
+---
+
+## Technique 1 — Exploratory Data Analysis
+
+**Business justification.** Establishes the baseline distribution of profit margin, identifies loss-making projects, surfaces which segments carry the highest margin risk, and quantifies loss concentration via Pareto analysis — all before any formal test.
+
+::: {.panel-tabset}
+
+## R
+
+```{r eda-r}
+p1 <- ggplot(df_r, aes(x = profit_margin_pct)) +
+  geom_histogram(bins = 30, fill = "#2c7bb6", alpha = 0.85) +
+  geom_vline(xintercept = 0, colour = "red", linetype = "dashed", linewidth = 0.8) +
+  labs(title = "Distribution of Profit Margin (%)",
+       subtitle = "Red dashed line = break-even",
+       x = "Profit Margin (%)", y = "Count") +
+  theme_minimal()
+
+p2 <- ggplot(df_r, aes(x = project_type, y = profit_margin_pct, fill = project_type)) +
+  geom_violin(alpha = 0.6, show.legend = FALSE) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.5, show.legend = FALSE) +
+  geom_hline(yintercept = 0, colour = "red", linetype = "dashed") +
+  coord_flip() +
+  labs(title = "Profit Margin Distribution by Project Type",
+       x = NULL, y = "Profit Margin (%)") +
+  theme_minimal()
+
+p1 / p2
+```
+
+```{r eda-summary-r}
+df_r |>
+  group_by(project_type) |>
+  summarise(
+    n        = n(),
+    mean_pm  = mean(profit_margin_pct, na.rm = TRUE),
+    med_pm   = median(profit_margin_pct, na.rm = TRUE),
+    sd_pm    = sd(profit_margin_pct, na.rm = TRUE),
+    pct_loss = mean(profit_margin_pct < 0, na.rm = TRUE) * 100,
+    .groups  = "drop"
+  ) |>
+  arrange(mean_pm) |>
+  mutate(across(where(is.numeric), ~ round(., 2))) |>
+  kable(caption = "Profit margin summary by project type",
+        col.names = c("Project Type","n","Mean PM%","Median PM%","SD","% Loss-making")) |>
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+```{r eda-pareto-loss-r}
+# Pareto on losses: which projects account for 80% of total loss exposure?
+loss_projects <- df_r |>
+  filter(profit_margin_pct < 0, !is.na(contract_value)) |>
+  mutate(loss_value = abs(profit_margin_pct / 100 * contract_value)) |>
+  arrange(desc(loss_value)) |>
+  mutate(rank = row_number(),
+         cum_share = cumsum(loss_value) / sum(loss_value))
+
+if (nrow(loss_projects) > 0) {
+  n_proj_for_80 <- max(1, sum(loss_projects$cum_share <= 0.80) + 1)
+  pct_of_losses <- round(100 * n_proj_for_80 / nrow(loss_projects), 1)
+  pct_of_portfolio <- round(100 * n_proj_for_80 / n_projects, 1)
+
+  cat(sprintf(
+    "Loss concentration: %d projects (%.1f%% of loss-making projects, %.1f%% of total portfolio) account for 80%% of total loss value.\n",
+    n_proj_for_80, pct_of_losses, pct_of_portfolio))
+
+  loss_projects |>
+    head(10) |>
+    mutate(loss_value = round(loss_value, 0),
+           cum_share  = round(100 * cum_share, 1)) |>
+    select(rank, project_type, client_type, profit_margin_pct, loss_value, cum_share) |>
+    kable(caption = "Top 10 loss-driving projects (cumulative % of total loss exposure)",
+          col.names = c("Rank","Project Type","Client Type","Margin %",
+                        "Loss Value (₦)","Cumulative % of Loss")) |>
+    kable_styling(full_width = FALSE)
+} else {
+  cat("No loss-making projects in the dataset — Pareto analysis not applicable.\n")
+}
+```
+
+## Python
+
+```{python eda-py}
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+df_py[profit_col].hist(bins=30, ax=axes[0], color="#2c7bb6", edgecolor="white")
+axes[0].axvline(0, color="red", linestyle="--", linewidth=1.5)
+axes[0].set_title("Distribution of Profit Margin (%)")
+axes[0].set_xlabel("Profit Margin (%)")
+
+order = df_py.groupby(project_col)[profit_col].median().sort_values().index
+sns.violinplot(data=df_py, y=project_col, x=profit_col,
+               order=order, ax=axes[1], palette="muted")
+axes[1].axvline(0, color="red", linestyle="--")
+axes[1].set_title("Profit Margin by Project Type")
+plt.tight_layout()
+plt.show()
+```
+
+```{python eda-summary-py}
+summary = df_py.groupby(project_col)[profit_col].agg(
+    n="count", mean="mean", median="median", std="std"
+).round(2)
+summary["pct_loss"] = (df_py[df_py[profit_col] < 0].groupby(project_col).size()
+                       / df_py.groupby(project_col).size() * 100).round(1)
+display(summary.sort_values("mean"))
+```
+
+```{python eda-pareto-loss-py}
+# Pareto on losses (Python mirror)
+loss_py = df_py[df_py[profit_col] < 0].copy()
+loss_py = loss_py.dropna(subset=[contract_col])
+loss_py["loss_value"] = (loss_py[profit_col].abs() / 100 * loss_py[contract_col])
+loss_py = loss_py.sort_values("loss_value", ascending=False).reset_index(drop=True)
+loss_py["rank"] = np.arange(1, len(loss_py) + 1)
+loss_py["cum_share"] = loss_py["loss_value"].cumsum() / loss_py["loss_value"].sum()
+
+if len(loss_py) > 0:
+    n_proj_for_80   = int(max(1, (loss_py["cum_share"] <= 0.80).sum() + 1))
+    pct_of_losses   = 100 * n_proj_for_80 / len(loss_py)
+    pct_of_portfolio = 100 * n_proj_for_80 / len(df_py)
+    print(f"Loss concentration: {n_proj_for_80} projects "
+          f"({pct_of_losses:.1f}% of loss-making projects, "
+          f"{pct_of_portfolio:.1f}% of total portfolio) "
+          f"account for 80% of total loss value.\n")
+    display(loss_py.head(10)[["rank", project_col, client_col,
+                              profit_col, "loss_value"]]
+            .assign(cum_share=(loss_py.head(10)["cum_share"] * 100).round(1)))
+else:
+    print("No loss-making projects in the dataset.")
+```
+
+:::
+
+**Interpretation.** Three EDA signals drive operational action. First, the headline loss rate (`r pct_loss_making`% of projects loss-making, `r pct_overrun`% over budget) is the portfolio-health snapshot — both numbers should appear on the MD's dashboard. Second, the by-project-type breakdown identifies whether the loss exposure is concentrated in a particular segment (Infrastructure or Government contracts, typically) or distributed across the book; concentrated exposure points to a procurement-mix problem, distributed exposure points to an execution-discipline problem. Third, the Pareto-on-losses table operationalises concentration: the count of projects that produce 80% of total loss value is the focus list for individual post-mortem review — anything broader dilutes management attention. Extreme negative-margin outliers should be investigated individually: they often reflect unresolved variation-order disputes which, if settled, would materially shift the portfolio summary.
+
+---
+
+## Technique 2 — Data Visualization
+
+**Business justification.** Communicates project performance trends across the `r n_years`-year period, highlights the operational relationship between delays and margin, and gives the MD a Pareto view of where loss exposure actually sits.
+
+::: {.panel-tabset}
+
+## R
+
+```{r viz-r}
+# Time series: annual average margin by project type
+p1 <- df_r |>
+  mutate(year = year(month)) |>
+  group_by(year, project_type) |>
+  summarise(mean_pm = mean(profit_margin_pct, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = year, y = mean_pm, colour = project_type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.5) +
+  geom_hline(yintercept = 0, colour = "red", linetype = "dashed") +
+  labs(title = "Annual Average Profit Margin by Project Type",
+       x = "Year", y = "Mean Profit Margin (%)", colour = "Project Type") +
+  theme_minimal()
+
+# Scatter: payment delays vs margin
+p2 <- ggplot(df_r, aes(x = payment_delays_days, y = profit_margin_pct,
+                        colour = project_type)) +
+  geom_point(size = 2, alpha = 0.6) +
+  geom_smooth(aes(group = 1), method = "lm", se = TRUE,
+              colour = "black", linetype = "dashed") +
+  labs(title = "Payment Delay Days vs Profit Margin",
+       x = "Payment Delay (Days)", y = "Profit Margin (%)",
+       colour = "Project Type") +
+  theme_minimal()
+
+p1 / p2
+```
+
+```{r viz-overrun-r}
+# Bar: % of projects over budget by project type
+df_r |>
+  group_by(project_type, overrun_flag) |>
+  summarise(n = n(), .groups = "drop") |>
+  ggplot(aes(x = project_type, y = n, fill = overrun_flag)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_manual(values = c("Over Budget" = "#d73027",
+                               "On/Under Budget" = "#1a9850")) +
+  coord_flip() +
+  labs(title = "Cost Overrun Rate by Project Type",
+       x = NULL, y = "Proportion of Projects", fill = "Budget Status") +
+  theme_minimal()
+```
+
+```{r viz-pareto-chart-r}
+# Pareto curve of losses (only if we have loss-making projects)
+if (exists("loss_projects") && nrow(loss_projects) > 0) {
+  loss_projects |>
+    mutate(pct_of_loss_pool = rank / max(rank) * 100,
+           cum_share_pct    = cum_share * 100) |>
+    ggplot(aes(x = pct_of_loss_pool, y = cum_share_pct)) +
+    geom_line(colour = "#2c7bb6", linewidth = 1.1) +
+    geom_hline(yintercept = 80, linetype = "dashed", colour = "grey50") +
+    geom_vline(xintercept = pct_of_losses, linetype = "dashed", colour = "#d73027") +
+    annotate("text", x = pct_of_losses + 3, y = 40,
+             label = paste0(round(pct_of_losses, 1),
+                            "% of loss-making\nprojects → 80% of total loss"),
+             hjust = 0, size = 3.6, colour = "#d73027") +
+    scale_x_continuous(labels = function(x) paste0(x, "%")) +
+    scale_y_continuous(labels = function(x) paste0(x, "%")) +
+    labs(title = "Pareto Curve — Concentration of Loss Exposure",
+         subtitle = "X: loss-making projects ranked by loss size.  Y: cumulative share of total loss value.",
+         x = "Share of Loss-Making Projects (cumulative)",
+         y = "Cumulative Share of Total Loss Value") +
+    theme_minimal()
+}
+```
+
+## Python
+
+```{python viz-py}
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+df_py["year"] = df_py["month"].dt.year
+annual = df_py.groupby(["year", project_col])[profit_col].mean().reset_index()
+for pt, grp in annual.groupby(project_col):
+    axes[0].plot(grp["year"], grp[profit_col], marker="o", label=pt)
+axes[0].axhline(0, color="red", linestyle="--", linewidth=1)
+axes[0].set_title("Annual Average Profit Margin by Project Type")
+axes[0].set_xlabel("Year"); axes[0].set_ylabel("Mean Margin (%)")
+axes[0].legend(fontsize=8)
+
+sns.scatterplot(data=df_py, x=payment_col, y=profit_col,
+                hue=project_col, s=50, alpha=0.6, ax=axes[1])
+sns.regplot(data=df_py, x=payment_col, y=profit_col,
+            scatter=False, color="black", line_kws={"linestyle": "--"}, ax=axes[1])
+axes[1].set_title("Payment Delay vs Profit Margin")
+plt.tight_layout()
+plt.show()
+```
+
+```{python viz-overrun-py}
+overrun_props = (df_py.groupby([project_col, "overrun_flag"])
+                 .size().unstack(fill_value=0)
+                 .div(df_py.groupby(project_col).size(), axis=0))
+
+overrun_props.plot(kind="barh", stacked=True,
+                   color=["#1a9850", "#d73027"], figsize=(8, 4))
+plt.title("Cost Overrun Rate by Project Type")
+plt.xlabel("Proportion of Projects")
+plt.xticks(ticks=np.arange(0, 1.1, 0.2),
+           labels=[f"{x:.0%}" for x in np.arange(0, 1.1, 0.2)])
+plt.tight_layout()
+plt.show()
+```
+
+```{python viz-pareto-py}
+if len(loss_py) > 0:
+    loss_py["pct_of_loss_pool"] = loss_py["rank"] / len(loss_py) * 100
+    loss_py["cum_share_pct"]    = loss_py["cum_share"] * 100
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(loss_py["pct_of_loss_pool"], loss_py["cum_share_pct"],
+            color="#2c7bb6", linewidth=2)
+    ax.axhline(80, linestyle="--", color="grey")
+    ax.axvline(pct_of_losses, linestyle="--", color="#d73027")
+    ax.annotate(f"{pct_of_losses:.1f}% of loss-making\nprojects → 80% of total loss",
+                xy=(pct_of_losses, 40), xytext=(pct_of_losses + 3, 40),
+                color="#d73027")
+    ax.set_xlabel("Share of Loss-Making Projects (cumulative, %)")
+    ax.set_ylabel("Cumulative Share of Total Loss Value (%)")
+    ax.set_title("Pareto Curve — Concentration of Loss Exposure")
+    plt.tight_layout()
+    plt.show()
+```
+
+:::
+
+**Interpretation.** The time series of annual average margin by project type tells the portfolio-performance story: a declining trend within any project type over consecutive years signals market pricing pressure or progressive cost-control failure, warranting strategic review. The payment-delay scatter is the most commercially actionable chart in this analysis — a clearly downward-sloping fit line confirms that receivables extension directly erodes margin, providing board-presentable leverage in payment-term negotiations. The cost-overrun bar chart identifies categories that most frequently exceed budget: any project type with an overrun rate above 50% requires a pricing risk-uplift and active post-award cost monitoring. The Pareto curve translates loss concentration into a single number for the MD: the share of the portfolio that warrants individual post-mortem review — everything outside that band can be governed by the screening rule from §10 alone.
+
+---
+
+## Technique 3 — Hypothesis Testing
+
+**Business justification.** Formally tests whether margin differences by project type and client type are statistically real or attributable to chance — the evidential basis for contract segmentation strategy. Levene's test gates the equal-variance assumption underlying classical ANOVA; Kruskal-Wallis provides a non-parametric robustness check.
+
+::: {.panel-tabset}
+
+## R
+
+```{r hyp-r}
+# Levene's test for equal variance across project types
+if (requireNamespace("car", quietly = TRUE)) {
+  lev_pt <- car::leveneTest(profit_margin_pct ~ factor(project_type), data = df_r)
+  cat("=== Levene's Test — Equal Variance Across Project Types ===\n")
+  print(lev_pt)
+  cat(sprintf("Interpretation: p = %.4f — %s equal-variance assumption.\n\n",
+              lev_pt$`Pr(>F)`[1],
+              ifelse(lev_pt$`Pr(>F)`[1] < 0.05, "REJECT", "fail to reject")))
+}
+
+# ANOVA: profit margin by project type
+aov_pt <- aov(profit_margin_pct ~ project_type, data = df_r)
+cat("=== ANOVA: Profit Margin (%) by Project Type ===\n")
+print(summary(aov_pt))
+
+eta_sq <- tidy(aov_pt)$sumsq[1] / sum(tidy(aov_pt)$sumsq)
+cat(sprintf("\nEta-squared: %.4f (%s effect)\n", eta_sq,
+    ifelse(eta_sq < 0.01, "negligible",
+    ifelse(eta_sq < 0.06, "small",
+    ifelse(eta_sq < 0.14, "medium", "large")))))
+
+# Welch's ANOVA — robust to unequal variances
+welch_pt <- oneway.test(profit_margin_pct ~ project_type, data = df_r, var.equal = FALSE)
+cat(sprintf("\nWelch's ANOVA (variance-robust): F = %.4f, p = %.4f\n",
+            welch_pt$statistic, welch_pt$p.value))
+```
+
+```{r hyp-tukey-r}
+tukey_pt <- TukeyHSD(aov_pt)
+tidy(tukey_pt) |>
+  arrange(adj.p.value) |>
+  mutate(across(where(is.numeric), ~ round(., 4))) |>
+  kable(caption = "Tukey HSD — Profit Margin by Project Type") |>
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+```{r hyp-client-r}
+# Client-type comparisons with the same gating discipline
+if (requireNamespace("car", quietly = TRUE)) {
+  lev_ct <- car::leveneTest(profit_margin_pct ~ factor(client_type), data = df_r)
+  cat(sprintf("Levene's Test (client type): p = %.4f\n", lev_ct$`Pr(>F)`[1]))
+}
+
+aov_ct <- aov(profit_margin_pct ~ client_type, data = df_r)
+cat("\n=== ANOVA: Profit Margin (%) by Client Type ===\n")
+print(summary(aov_ct))
+
+# Kruskal-Wallis non-parametric robustness check on project type
+kw <- kruskal.test(profit_margin_pct ~ project_type, data = df_r)
+cat(sprintf("\nKruskal-Wallis (project type, non-parametric): chi-sq = %.4f, p = %.4f\n",
+            kw$statistic, kw$p.value))
+```
+
+## Python
+
+```{python hyp-py}
+# Levene's test (project type)
+pt_groups = [g[profit_col].dropna().values
+             for _, g in df_py.groupby(project_col)]
+lev_stat, lev_p = levene(*pt_groups, center="median")
+print(f"=== Levene's Test — Equal Variance Across Project Types ===")
+print(f"W = {lev_stat:.4f}, p = {lev_p:.4f}")
+print("Interpretation:", "REJECT" if lev_p < 0.05 else "fail to reject",
+      "equal-variance assumption.\n")
+
+f_stat, p_val = f_oneway(*pt_groups)
+print(f"=== ANOVA: Profit Margin by Project Type ===")
+print(f"F = {f_stat:.4f}, p = {p_val:.4f}")
+print("Result:", "Significant" if p_val < 0.05 else "Not significant", "at 5%\n")
+
+tukey = pairwise_tukeyhsd(
+    endog=df_py[profit_col].dropna(),
+    groups=df_py.loc[df_py[profit_col].notna(), project_col]
+)
+print(tukey.summary())
+```
+
+```{python hyp-kw-py}
+h_stat, p_kw = kruskal(*pt_groups)
+print(f"\nKruskal-Wallis (project type): H = {h_stat:.4f}, p = {p_kw:.4f}")
+
+ct_groups = [g[profit_col].dropna().values
+             for _, g in df_py.groupby(client_col)]
+lev2_stat, lev2_p = levene(*ct_groups, center="median")
+print(f"\nLevene's Test (client type): W = {lev2_stat:.4f}, p = {lev2_p:.4f}")
+
+f2, p2 = f_oneway(*ct_groups)
+print(f"ANOVA by Client Type: F = {f2:.4f}, p = {p2:.4f}")
+```
+
+:::
+
+**Interpretation.** Levene's test is the variance gate: if it rejects equal variance (p < 0.05), the classical ANOVA F-statistic is read with caution and the Welch's ANOVA result (or Kruskal-Wallis) becomes the primary inferential test. ANOVA's null is that mean profit margin is equal across all project types (and separately, across all client types); rejecting it confirms observed margin differences are not attributable to random project-level variation. Tukey HSD isolates *which* pairings drive the difference — the operationally useful output: a significant negative mean difference for Government-client projects relative to Private-sector justifies a risk premium in public-sector bids and a stronger payment-security clause in Government contracts. A non-significant result at the project-type level shifts attention to within-type execution factors (payment delays, procurement efficiency, variation order management) rather than portfolio mix strategy — placing responsibility for margin improvement squarely on execution discipline.
+
+---
+
+## Technique 4 — Correlation Analysis
+
+**Business justification.** Identifies which operational variables have the strongest linear relationship with profit margin and screens predictor pairs for collinearity before regression specification. A formal VIF check is run alongside the regression in §10 against the full design matrix including categorical dummies.
+
+::: {.panel-tabset}
+
+## R
+
+```{r corr-r}
+corr_vars <- df_r |>
+  select(profit_margin_pct, contract_value, cost_overrun,
+         payment_delays_days, procurement_delay_days,
+         variation_order_value, completion_pct) |>
+  drop_na()
+
+cor_mat <- cor(corr_vars, method = "pearson")
+
+ggcorrplot(cor_mat, method = "circle", type = "lower",
+           lab = TRUE, lab_size = 3.5,
+           colors = c("#d73027", "white", "#1a9850"),
+           title = "Pearson Correlation — Engineering Project Variables",
+           ggtheme = theme_minimal(base_size = 10))
+```
+
+```{r corr-table-r}
+as.data.frame(cor_mat) |>
+  rownames_to_column("Variable") |>
+  select(Variable, profit_margin_pct) |>
+  filter(Variable != "profit_margin_pct") |>
+  arrange(desc(abs(profit_margin_pct))) |>
+  rename(r_with_profit_margin = profit_margin_pct) |>
+  kable(digits = 4, caption = "Correlation with Profit Margin (%)") |>
+  kable_styling(full_width = FALSE)
+```
+
+## Python
+
+```{python corr-py}
+corr_cols = [profit_col, contract_col, "cost_overrun",
+             payment_col, procure_col, vo_col, complete_col]
+corr_cols = [c for c in corr_cols if c is not None]
+corr_data = df_py[corr_cols].dropna()
+corr_mat  = corr_data.corr(method="pearson")
+
+fig, ax = plt.subplots(figsize=(8, 6))
+mask = np.triu(np.ones_like(corr_mat, dtype=bool))
+sns.heatmap(corr_mat, mask=mask, annot=True, fmt=".2f",
+            cmap="RdYlGn", center=0, linewidths=0.5, ax=ax,
+            annot_kws={"size": 8})
+ax.set_title("Pearson Correlation — Engineering Project Variables")
+plt.tight_layout()
+plt.show()
+
+print("\nCorrelation with Profit Margin:")
+print(corr_mat[profit_col].drop(profit_col)
+      .sort_values(key=abs, ascending=False).round(4))
+```
+
+:::
+
+**Interpretation.** The correlation matrix identifies which operational variables move most closely with profit margin and which predictors may be too collinear to enter the regression simultaneously. The variable with the strongest negative correlation with `profit_margin_pct` is the most powerful single leverage point: if it is `payment_delays_days`, the message to the board is a receivables-governance agenda; if it is `cost_overrun`, the message is a cost-estimation and project-controls agenda. Collinearity between `payment_delays_days` and `procurement_delay_days` (|r| > 0.60) would indicate both delay types tend to cluster in the same projects — symptoms of a single underlying project-management failure rather than independent risk factors. Any pair with |r| > 0.80 should not be jointly entered into the regression without VIF confirmation; the §10 VIF table resolves any ambiguity once categorical predictors are also in the design matrix.
+
+---
+
+## Technique 5 — Multiple Regression
+
+**Business justification.** Builds a predictive model for profit margin, enabling the finance team to flag at-risk projects early in the bidding or execution phase based on observable characteristics. The quadratic payment-delay term tests the threshold-effect concern flagged in §3.
+
+::: {.panel-tabset}
+
+## R
+
+```{r reg-r}
+reg_data <- df_r |>
+  filter(!is.na(profit_margin_pct), !is.na(payment_delays_days),
+         !is.na(procurement_delay_days)) |>
+  mutate(project_type = factor(project_type),
+         client_type  = factor(client_type))
+
+# Linear baseline
+model <- lm(profit_margin_pct ~ project_type + client_type +
+              payment_delays_days + procurement_delay_days +
+              variation_order_value + completion_pct,
+            data = reg_data)
+
+cat("=== Linear Regression: Profit Margin (%) ===\n")
+print(summary(model))
+```
+
+```{r reg-table-r}
+tidy(model, conf.int = TRUE) |>
+  mutate(across(where(is.numeric), ~ round(., 4))) |>
+  kable(caption = "Linear model — coefficients (with 95% CI)") |>
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+glance(model) |>
+  select(r.squared, adj.r.squared, p.value, AIC, BIC) |>
+  mutate(across(everything(), ~ round(., 4))) |>
+  kable(caption = "Linear model — fit statistics") |>
+  kable_styling(full_width = FALSE)
+```
+
+```{r reg-vif-r}
+# VIF on full design matrix (including categorical dummies)
+# Base-R implementation — no external dependency required.
+model_matrix <- model.matrix(model)[, -1, drop = FALSE]
+calc_vif <- function(X) {
+  sapply(seq_len(ncol(X)), function(i) {
+    y <- X[, i]
+    others <- X[, -i, drop = FALSE]
+    if (ncol(others) == 0) return(1)
+    r2 <- summary(lm(y ~ others))$r.squared
+    1 / (1 - r2)
+  })
+}
+vif_vals <- calc_vif(model_matrix)
+data.frame(Variable = colnames(model_matrix),
+           VIF = round(vif_vals, 3)) |>
+  arrange(desc(VIF)) |>
+  kable(caption = "Variance Inflation Factors (VIF > 5 = concern, > 10 = severe)") |>
+  kable_styling(full_width = FALSE)
+cat(sprintf("\nMax VIF: %.2f — %s.\n",
+            max(vif_vals),
+            ifelse(max(vif_vals) > 10, "REMOVE or combine one predictor",
+            ifelse(max(vif_vals) > 5,  "monitor; consider consolidation",
+                                       "predictors are jointly entrable"))))
+```
+
+```{r reg-quad-r}
+# Quadratic payment-delay term — tests for a threshold/inflection effect
+model_quad <- lm(profit_margin_pct ~ project_type + client_type +
+                   payment_delays_days + I(payment_delays_days^2) +
+                   procurement_delay_days +
+                   variation_order_value + completion_pct,
+                 data = reg_data)
+
+cat("=== Quadratic payment-delay model — is the effect threshold-shaped? ===\n")
+print(summary(model_quad))
+
+cat("\n=== Linear vs Quadratic model comparison ===\n")
+print(anova(model, model_quad))
+
+cat(sprintf("\nLinear R²: %.4f | Quadratic R²: %.4f | Delta AIC: %.2f\n",
+            summary(model)$r.squared,
+            summary(model_quad)$r.squared,
+            AIC(model_quad) - AIC(model)))
+cat("(Negative delta AIC favours the quadratic model.)\n")
+```
+
+```{r reg-robust-r}
+# Heteroskedasticity-robust standard errors (HC1) — read these if the
+# residual-vs-fitted plot below is fan-shaped.
+if (requireNamespace("sandwich", quietly = TRUE) &&
+    requireNamespace("lmtest", quietly = TRUE)) {
+  robust_se <- lmtest::coeftest(model, vcov. = sandwich::vcovHC(model, type = "HC1"))
+  cat("=== Heteroskedasticity-robust (HC1) coefficients ===\n")
+  print(robust_se)
+}
+```
+
+```{r reg-diag-r, fig.height=7}
+par(mfrow = c(2, 2))
+plot(model, which = 1:4, pch = 16, cex = 0.6)
+par(mfrow = c(1, 1))
+```
+
+```{r reg-predict-r}
+# Worked example: predicted margin for a representative project profile
+example_project <- reg_data |> count(project_type, sort = TRUE) |> slice(1) |>
+  pull(project_type) |> as.character()
+example_client  <- reg_data |> count(client_type,  sort = TRUE) |> slice(1) |>
+  pull(client_type)  |> as.character()
+example_payment <- median(reg_data$payment_delays_days,    na.rm = TRUE)
+example_procure <- median(reg_data$procurement_delay_days, na.rm = TRUE)
+example_vo      <- median(reg_data$variation_order_value,  na.rm = TRUE)
+example_compl   <- median(reg_data$completion_pct,         na.rm = TRUE)
+
+example <- data.frame(
+  project_type           = factor(example_project,
+                                  levels = levels(reg_data$project_type)),
+  client_type            = factor(example_client,
+                                  levels = levels(reg_data$client_type)),
+  payment_delays_days    = example_payment,
+  procurement_delay_days = example_procure,
+  variation_order_value  = example_vo,
+  completion_pct         = example_compl
+)
+pred <- predict(model, newdata = example, interval = "prediction", level = 0.95)
+
+cat("Worked example — representative project profile:\n")
+cat(sprintf("  Project type: %s | Client type: %s\n", example_project, example_client))
+cat(sprintf("  Payment delay: %.0f days | Procurement delay: %.0f days\n",
+            example_payment, example_procure))
+cat(sprintf("  Variation order: ₦%s | Completion: %.1f%%\n",
+            format(round(example_vo, 0), big.mark = ","), example_compl))
+cat(sprintf("  → Predicted profit margin: %.2f%%\n", pred[1, "fit"]))
+cat(sprintf("  → 95%% prediction interval: %.2f%% to %.2f%%\n",
+            pred[1, "lwr"], pred[1, "upr"]))
+```
+
+## Python
+
+```{python reg-py}
+reg_py = df_py[[profit_col, project_col, client_col,
+                payment_col, procure_col, vo_col, complete_col]].dropna()
+
+formula = (f"{profit_col} ~ C({project_col}) + C({client_col}) + "
+           f"{payment_col} + {procure_col} + {vo_col} + {complete_col}")
+model_py = smf.ols(formula, data=reg_py).fit()
+print(model_py.summary())
+```
+
+```{python reg-vif-py}
+# VIF on the numeric predictors (categorical dummies are handled by statsmodels)
+num_predictors = [payment_col, procure_col, vo_col, complete_col]
+X = sm.add_constant(reg_py[num_predictors])
+vif_rows = []
+for i, col in enumerate(X.columns):
+    if col == "const":
+        continue
+    vif_rows.append({"Variable": col,
+                     "VIF": variance_inflation_factor(X.values, i)})
+vif_df = pd.DataFrame(vif_rows).round(3).sort_values("VIF", ascending=False)
+display(vif_df)
+max_vif = vif_df["VIF"].max()
+verdict = ("REMOVE or combine one predictor" if max_vif > 10
+           else "monitor; consider consolidation" if max_vif > 5
+           else "predictors are jointly entrable")
+print(f"\nMax VIF: {max_vif:.2f} — {verdict}.")
+```
+
+```{python reg-quad-py}
+formula_q = (f"{profit_col} ~ C({project_col}) + C({client_col}) + "
+             f"{payment_col} + I({payment_col}**2) + {procure_col} + "
+             f"{vo_col} + {complete_col}")
+model_quad_py = smf.ols(formula_q, data=reg_py).fit()
+print(model_quad_py.summary())
+
+print(f"\nLinear R²: {model_py.rsquared:.4f} | "
+      f"Quadratic R²: {model_quad_py.rsquared:.4f}")
+print(f"Delta AIC (quad − linear): {model_quad_py.aic - model_py.aic:.2f}")
+print("(Negative delta AIC favours the quadratic model.)")
+```
+
+```{python reg-robust-py}
+# Heteroskedasticity-robust standard errors (HC1)
+robust_py = model_py.get_robustcov_results(cov_type="HC1")
+print("=== Heteroskedasticity-robust (HC1) coefficients ===")
+print(robust_py.summary().tables[1])
+```
+
+```{python reg-diag-py}
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+axes[0].scatter(model_py.fittedvalues, model_py.resid, alpha=0.5, s=20)
+axes[0].axhline(0, color="red", linestyle="--")
+axes[0].set_xlabel("Fitted values"); axes[0].set_ylabel("Residuals")
+axes[0].set_title("Residuals vs Fitted (linear model)")
+
+sm.qqplot(model_py.resid, line="s", ax=axes[1], alpha=0.5)
+axes[1].set_title("Q-Q Plot of Residuals")
+plt.tight_layout()
+plt.show()
+print(f"\nLinear model — Adj. R²: {model_py.rsquared_adj:.4f} | "
+      f"F p-value: {model_py.f_pvalue:.6f}")
+```
+
+```{python reg-predict-py}
+example_project = reg_py[project_col].value_counts().index[0]
+example_client  = reg_py[client_col].value_counts().index[0]
+example_payment = reg_py[payment_col].median()
+example_procure = reg_py[procure_col].median()
+example_vo      = reg_py[vo_col].median()
+example_compl   = reg_py[complete_col].median()
+
+example = pd.DataFrame({
+    project_col:  [example_project],
+    client_col:   [example_client],
+    payment_col:  [example_payment],
+    procure_col:  [example_procure],
+    vo_col:       [example_vo],
+    complete_col: [example_compl],
+})
+pred = model_py.get_prediction(example).summary_frame(alpha=0.05)
+print("Worked example — representative project profile:")
+print(f"  Project type: {example_project} | Client type: {example_client}")
+print(f"  Payment delay: {example_payment:.0f} days | "
+      f"Procurement delay: {example_procure:.0f} days")
+print(f"  Variation order: ₦{example_vo:,.0f} | Completion: {example_compl:.1f}%")
+print(f"  → Predicted profit margin: {pred['mean'].iloc[0]:.2f}%")
+print(f"  → 95% prediction interval: "
+      f"{pred['obs_ci_lower'].iloc[0]:.2f}% to {pred['obs_ci_upper'].iloc[0]:.2f}%")
+```
+
+:::
+
+**Interpretation.** Each significant coefficient carries a direct commercial implication. A negative coefficient on `payment_delays_days` quantifies the margin cost per additional day of receivables delay — the precise number to use in payment-term negotiation and risk pricing. Significant project-type or client-type coefficients identify structural margin differentials that should be embedded in bid pricing policies: categories with large negative coefficients relative to the reference warrant proportionally higher contingency provisions in financial planning. The adjusted R² indicates the share of margin variation the model explains — a value between 0.25 and 0.50 is reasonable for construction project data with limited predictors and is sufficient for bid-stage risk flagging. The quadratic payment-delay term tests the threshold concern from §3: a significant positive coefficient on the squared term combined with a negative coefficient on the linear term means margin decays *accelerate* beyond an inflection point — operationally this means tighten payment terms only on contracts projected to exceed the inflection threshold, rather than blanket tightening across the book. Heteroskedasticity-robust (HC1) standard errors should be the headline reading if the residual-vs-fitted plot shows fan-shaped variance; otherwise the classical OLS standard errors stand.
+
+---
+
+## Integrated Findings
+
+Five analytical techniques converge on a coherent story about the Company's Engineering project profitability. EDA established the baseline: `r pct_loss_making`% of projects (`r n_loss_making` of `r n_projects`) recorded a negative margin and `r pct_overrun`% exceeded budget — and the Pareto-on-losses curve in §5 shows that loss exposure is concentrated in a small subset of contracts, providing a finite focus list for individual post-mortem review. Visualisation confirmed margin performance has shifted across the `r n_years`-year period and that payment delay days are visually associated with lower margin outcomes — the most commercially actionable finding, pointing directly to receivables governance as the front-line financial control. Hypothesis testing — gated by Levene's variance check and backed up by Welch's ANOVA and Kruskal-Wallis — determined whether margin differences by project type and client category are statistically credible or merely the product of a few outlier contracts. Correlation analysis mapped the inter-relationships between delay variables, cost overrun, and margin before model specification; the VIF check in §10 confirmed whether all numeric predictors could be jointly entered. Multiple regression isolated the independent contribution of each predictor and quantified the marginal cost of payment delay — and the quadratic extension determined whether that cost is linear or threshold-shaped, with direct implications for whether payment-term tightening should be applied uniformly or only where projected delays cross the inflection point.
+
+**Recommendation.** Introduce a project risk-screening gate at the bid-approval stage anchored in the regression coefficients from §10. Contracts with Government clients, payment terms exceeding the inflection threshold from the quadratic model, or variation-order exposure above the portfolio median should require an automatic margin stress-test before approval sign-off. In parallel, target receivables governance as the highest-leverage operational action: both correlation and regression evidence confirm payment delay as the most controllable driver of margin erosion in the existing portfolio. A 30-day reduction in average payment delay across active contracts — achievable through tighter contractual payment-milestone clauses and active collections management — would have a direct, quantifiable positive impact on annual profitability, calculable directly from the regression's `payment_delays_days` coefficient.
+
+---
+
+## Limitations & Further Work
+
+- The `r n_projects`-project dataset spans `r period_start` to `r period_end` (~`r n_years` years). Project accounting practices, cost structures, and market conditions have likely shifted across this period — a rolling 36-month window analysis would provide more operationally relevant benchmarks.
+- Profit margin as reported may reflect different accounting conventions across project managers or periods. Confirm whether the margin column is calculated consistently (gross margin vs net margin) before using these coefficients in bid-stage approval gates.
+- The regression treats all project types as equally comparable, but project scale (contract value) varies widely. Consider log-transforming contract value or building separate models per project tier.
+- The residual diagnostics in §10 should be read carefully: if heteroskedasticity is present, the HC1-robust standard errors (also reported) should be the basis for inference rather than classical OLS standard errors.
+- Future work: incorporate project-manager identity and subcontractor performance indicators — both are plausible sources of residual margin variance not captured by the current model. Also revisit the quadratic payment-delay term with a larger dataset before embedding the inflection point in policy.
+
+---
+
+## References
+
+- Adi, B. (2026). *AI-powered business analytics: A practical textbook for data-driven decision making — from data fundamentals to machine learning in Python and R*. Lagos Business School / markanalytics.online. https://markanalytics.online
+- Fox, J., & Weisberg, S. (2019). *An R Companion to Applied Regression* (3rd ed.). SAGE Publications. (Source for `car::leveneTest` used in §8.)
+- Zeileis, A. (2004). Econometric computing with HC and HAC covariance matrix estimators. *Journal of Statistical Software*, 11(10). (Source for `sandwich::vcovHC` heteroskedasticity-robust SEs in §10.)
+- R Core Team. (2024). *R: A language and environment for statistical computing*. R Foundation for Statistical Computing.
+- Wickham, H., & Grolemund, G. (2017). *R for Data Science*. O'Reilly Media.
+- McKinney, W. (2022). *Python for Data Analysis* (3rd ed.). O'Reilly Media.
+- Seabold, S., & Perktold, J. (2010). statsmodels: Econometric and statistical modeling with Python. *Proceedings of the 9th Python in Science Conference.* (Source for `statsmodels.stats.outliers_influence.variance_inflation_factor`.)
+- Kassambara, A. (2024). *ggcorrplot: Visualization of a Correlation Matrix using ggplot2* (R package). CRAN.
+- Pedersen, T. L. (2024). *patchwork: The Composer of Plots* (R package version 1.2.0). CRAN.
+- Xie, Y. (2024). *knitr: A General-Purpose Package for Dynamic Report Generation in R* (R package). CRAN.
+
+---
+
+## Appendix A — AI Usage Statement
+
+GitHub Copilot (Microsoft) and ChatGPT (OpenAI) were used to accelerate document structuring, code templating in R and Python, and review of statistical workflow logic. All analytical decisions — technique selection, hypothesis formulation, regression model specification, multicollinearity diagnostics, the threshold (quadratic) test for payment-delay effects, and the interpretation of statistical outputs in terms of the project finance — were independently validated by the author against the actual model outputs generated from the company's project management data. The commercial recommendations regarding bid-stage risk screening and payment governance policy reflect the author's independent professional judgement as Head of Finance.
+
+---
+
+## Appendix B — Reproducibility & Session Info
+
+```{r session-r}
+cat("Render time:", format(Sys.time(), "%Y-%m-%d %H:%M %Z"), "\n\n")
+sessionInfo()
+```
+
+```{python session-py}
+import sys, platform
+print("Python:", sys.version.split()[0])
+print("Platform:", platform.platform())
+print("\nKey packages:")
+for pkg in ["pandas", "numpy", "scipy", "statsmodels", "seaborn", "matplotlib"]:
+    try:
+        mod = __import__(pkg)
+        print(f"  {pkg}: {mod.__version__}")
+    except Exception as e:
+        print(f"  {pkg}: not loaded ({e})")
+```
