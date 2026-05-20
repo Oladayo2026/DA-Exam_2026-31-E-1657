@@ -5,11 +5,12 @@ date: today
 format:
   html:
     theme: flatly
+    css: oladayo_report.css
     toc: true
     toc-depth: 3
     number-sections: true
     code-fold: true
-    code-tools: true
+    code-tools: false
     df-print: paged
     embed-resources: true
 execute:
@@ -26,6 +27,7 @@ execute:
 if (requireNamespace("reticulate", quietly = TRUE)) {
   venv_candidates <- c(
     Sys.getenv("RETICULATE_PYTHON", unset = ""),
+    "/Users/user/Documents/LandMan/UA High/LBA -EMBA -Nomso/.venv/bin/python",
     file.path(getwd(), ".venv", "bin", "python"),
     file.path(getwd(), ".venv", "Scripts", "python.exe"),
     file.path(Sys.getenv("HOME"), ".venv", "bin", "python")
@@ -68,6 +70,23 @@ if (requireNamespace("janitor", quietly = TRUE)) {
 
 set.seed(42)
 
+# Base-R Brown-Forsythe/Levene test using median-centered absolute deviations
+levene_test_r <- function(y, group) {
+  group <- factor(group)
+  ok <- !is.na(y) & !is.na(group)
+  y <- y[ok]
+  group <- droplevels(group[ok])
+  med <- tapply(y, group, median, na.rm = TRUE)
+  z <- abs(y - med[as.character(group)])
+  s <- summary(aov(z ~ group))[[1]]
+  data.frame(
+    Df = s[["Df"]],
+    `F value` = s[["F value"]],
+    `Pr(>F)` = s[["Pr(>F)"]],
+    check.names = FALSE
+  )
+}
+
 knitr::opts_chunk$set(fig.width = 9, fig.height = 5, dpi = 150)
 ```
 
@@ -94,7 +113,7 @@ np.random.seed(42)
 ```{r load-r, include=FALSE}
 # ⚠ Column names in raw CSV have leading/trailing whitespace —
 # janitor::clean_names() resolves all of these automatically.
-df_r <- read_csv("data/MEP_construction_company_projs.csv",
+df_r <- read_csv("data/construction_company_projs.csv",
                  col_types = cols(.default = col_character())) |>
   clean_names() |>    # strips whitespace, lowercases, converts spaces → underscores
   mutate(
@@ -130,7 +149,7 @@ pct_overrun       <- round(100 * n_overrun / sum(!is.na(df_r$overrun_flag)), 1)
 ```
 
 ```{python load-py, include=FALSE}
-df_py = pd.read_csv("data/MEP_construction_company_projs.csv", dtype=str)
+df_py = pd.read_csv("data/construction_company_projs.csv", dtype=str)
 
 # ⚠ Strip leading/trailing whitespace from all column names
 df_py.columns = df_py.columns.str.strip()
@@ -204,35 +223,35 @@ df_py["overrun_flag"] = np.where(df_py["cost_overrun"] > 0, "Over Budget", "On/U
 **Job title:** Head of Finance (CFO-designate)  
 **Organisation sector:** MEP construction and project delivery
 
-### Technique 1 — Exploratory Data Analysis
+### Exploratory Data Analysis
 As Head of Finance overseeing a `r n_projects`-project MEP portfolio spanning `r period_start` to `r period_end`, the most pressing strategic concern is margin volatility: why do some projects deliver healthy returns while others erode the company's financial position? Before any formal test, the *shape* of the margin distribution must be understood — what percentage of projects are loss-making, which project type clusters exhibit the widest variance, and whether the most extreme negative margins are genuine contractual losses or accounting artefacts such as variation orders not yet captured in the cost system. EDA establishes this baseline and determines whether distributional characteristics support parametric ANOVA and regression, or whether non-parametric alternatives are required. This mirrors the quarterly margin review prepared for the MD, where the opening chart always presents project-level performance distribution before any cause-and-effect analysis.
 
 **Alternative considered.** Starting with a regression model on the raw data to identify margin drivers directly. Rejected because undetected data quality issues — inconsistent margin calculations across project managers, missing variation order entries, incomplete cost records for in-progress projects — would silently bias coefficients and produce recommendations based on artefactual rather than genuine performance patterns.
 
 **Limitation.** EDA is descriptive only. A project type that appears to underperform on average may not do so significantly once variance and sample size are properly weighted. ANOVA and regression are required before making portfolio or bid-pricing decisions based on observed margin differences.
 
-### Technique 2 — Data Visualization
+###  Data Visualization
 Margin analytics in construction project finance serve a dual purpose: internal project management and external commercial strategy. The time series of annual average profit margin by project type answers a board-level question — is portfolio profitability improving or deteriorating, and are particular project segments driving a structural decline? The scatter of payment delay days against profit margin translates the most operationally controllable risk variable — receivables ageing — into a visual argument for tighter collection governance: a clearly negative slope provides the finance function with board-presentable leverage in payment-term negotiations. The cost overrun rate chart by project type gives procurement and the MD the input for risk-adjusted contracting and contingency provisioning. The Pareto curve of losses gives the MD a single decision-grade number: the share of the portfolio that is producing the bulk of the loss exposure.
 
 **Alternative considered.** Presenting only the regression output without supporting visualisations. Rejected because regression coefficients require contextual interpretation, and non-technical stakeholders — project managers, the MD, the board — rely on visuals to understand commercial implications. Charts also reveal non-linear patterns the linear regression may not capture.
 
 **Limitation.** The `r n_years`-year window introduces potential confounding from macroeconomic cycles, construction-material inflation post-2022, and changes in company project-intake policy. Trends should be read with awareness that the market environment has shifted materially across the period, and margin benchmarks from the earliest years may not apply to current bid pricing.
 
-### Technique 3 — Hypothesis Testing
+### Hypothesis Testing
 A recurrent finance-team debate is whether certain project categories or client types are structurally less profitable — and whether that difference is a reliable basis for adjusting bid strategy and risk provisioning, or merely a noise artefact from a few outlier projects. One-way ANOVA on profit margin across project types (Commercial, Residential, Industrial, Infrastructure) and across client types (Government, Private, Multinational) converts the qualitative observation into a defensible statistical claim. If ANOVA confirms a significant difference — for example, Government-client projects delivering systematically lower margin than Private-sector — that result supports a formal pricing adjustment and risk uplift for public-sector bids: a recommendation that can be taken to the MD with a p-value, not just an opinion. Levene's test and the non-parametric Kruskal-Wallis act as variance-assumption and robustness checks on the classical ANOVA result.
 
 **Alternative considered.** A simple comparison of highest- vs lowest-performing project type means. Rejected because that approach ignores variance and sample-size heterogeneity, allowing extreme outliers to dominate the narrative. Formal ANOVA with Tukey HSD post-hoc testing controls for multiple comparisons and identifies which specific pairings are genuinely different.
 
 **Limitation.** Some project-type or client-type subgroups contain fewer than 20 observations. For these smaller groups Tukey HSD has limited statistical power, and the absence of a significant result should not be taken as proof of equality. Kruskal-Wallis runs as a robustness check.
 
-### Technique 4 — Correlation Analysis
+### Correlation Analysis
 The five candidate predictors for the profit margin regression — payment delay days, procurement delay days, cost overrun, variation order value, and completion percentage — may be partly collinear. Projects with long payment delays may also experience procurement delays if cash-flow constraints defer materials procurement, inflating the apparent effect of both variables simultaneously if entered into the regression without screening. Correlation analysis maps these inter-variable relationships before model specification, identifying pairs with |r| > 0.70 that require careful handling to avoid unstable coefficient estimates. It also confirms the direction and magnitude of each variable's relationship with profit margin — establishing which operational levers are empirically linked to margin outcomes before any model is built.
 
 **Alternative considered.** Including all five predictors in the regression without prior screening. Rejected because high multicollinearity between payment and procurement delay variables could produce coefficient sign reversals or dramatically inflated standard errors, making the model practically unreliable for identifying margin improvement levers.
 
 **Limitation.** Pearson correlation captures only linear associations. If the relationship between payment delay and margin is threshold-based — e.g., margin is minimally affected for delays below 60 days but drops sharply beyond that — the correlation coefficient understates the true relationship. The regression in §10 explicitly tests for a non-linear payment-delay effect using a quadratic term to address this exact concern.
 
-### Technique 5 — Multiple Regression
+### Multiple Regression
 The central analytical objective is a project margin prediction model: given a contract's type, client category, payment history, procurement lead time, and variation order exposure, what is the expected profit margin? As Head of Finance, this model enables flagging high-risk contracts at the bid stage before resources are committed, building differentiated contingency provisions in the budget plan, and quantifying the margin cost of accepting unfavourable payment terms. The coefficient on `payment_delays_days` directly answers: *"what is the marginal cost — in percentage-point terms — of accepting a contract with 30 additional days of payment delay?"* A quadratic extension on the same predictor tests whether the effect is linear or threshold-shaped — operationally distinct interventions: linear means tighten payment terms uniformly; threshold means tighten only where projected payment-delay exceeds the inflection point.
 
 **Alternative considered.** Building a binary margin classification model (profitable vs. loss-making) using logistic regression. Rejected because the business question is not binary — it concerns the *degree* of margin performance — and a continuous OLS model provides more granular information for bid pricing and contingency quantification.
@@ -365,7 +384,7 @@ display(df_py[client_col].value_counts().rename_axis("client_type")
 
 ---
 
-## Technique 1 — Exploratory Data Analysis
+## Exploratory Data Analysis
 
 **Business justification.** Establishes the baseline distribution of profit margin, identifies loss-making projects, surfaces which segments carry the highest margin risk, and quantifies loss concentration via Pareto analysis — all before any formal test.
 
@@ -501,7 +520,7 @@ else:
 
 ---
 
-## Technique 2 — Data Visualization
+## Data Visualization
 
 **Business justification.** Communicates project performance trends across the `r n_years`-year period, highlights the operational relationship between delays and margin, and gives the MD a Pareto view of where loss exposure actually sits.
 
@@ -641,7 +660,7 @@ if len(loss_py) > 0:
 
 ---
 
-## Technique 3 — Hypothesis Testing
+## Hypothesis Testing
 
 **Business justification.** Formally tests whether margin differences by project type and client type are statistically real or attributable to chance — the evidential basis for contract segmentation strategy. Levene's test gates the equal-variance assumption underlying classical ANOVA; Kruskal-Wallis provides a non-parametric robustness check.
 
@@ -650,15 +669,31 @@ if len(loss_py) > 0:
 ## R
 
 ```{r hyp-r}
+# Normality check by project type (Shapiro-Wilk)
+cat("=== Shapiro-Wilk Normality (Profit Margin by Project Type) ===\n")
+sw_pt <- df_r |>
+  filter(!is.na(profit_margin_pct), !is.na(project_type)) |>
+  group_by(project_type) |>
+  summarise(
+    n = n(),
+    W = if (n() >= 3) shapiro.test(profit_margin_pct)$statistic else NA_real_,
+    p_value = if (n() >= 3) shapiro.test(profit_margin_pct)$p.value else NA_real_,
+    normal = if (n() >= 3) ifelse(shapiro.test(profit_margin_pct)$p.value > 0.05,
+                                  "Yes", "No (prefer Kruskal-Wallis/Welch)") else "n < 3",
+    .groups = "drop"
+  )
+sw_pt |>
+  mutate(across(where(is.numeric), ~ round(., 4))) |>
+  kable(caption = "Shapiro-Wilk normality by project type") |>
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
 # Levene's test for equal variance across project types
-if (requireNamespace("car", quietly = TRUE)) {
-  lev_pt <- car::leveneTest(profit_margin_pct ~ factor(project_type), data = df_r)
-  cat("=== Levene's Test — Equal Variance Across Project Types ===\n")
-  print(lev_pt)
-  cat(sprintf("Interpretation: p = %.4f — %s equal-variance assumption.\n\n",
-              lev_pt$`Pr(>F)`[1],
-              ifelse(lev_pt$`Pr(>F)`[1] < 0.05, "REJECT", "fail to reject")))
-}
+lev_pt <- levene_test_r(df_r$profit_margin_pct, df_r$project_type)
+cat("\n=== Levene's Test — Equal Variance Across Project Types ===\n")
+print(lev_pt)
+cat(sprintf("Interpretation: p = %.4f — %s equal-variance assumption.\n\n",
+            lev_pt$`Pr(>F)`[1],
+            ifelse(lev_pt$`Pr(>F)`[1] < 0.05, "REJECT", "fail to reject")))
 
 # ANOVA: profit margin by project type
 aov_pt <- aov(profit_margin_pct ~ project_type, data = df_r)
@@ -688,10 +723,25 @@ tidy(tukey_pt) |>
 
 ```{r hyp-client-r}
 # Client-type comparisons with the same gating discipline
-if (requireNamespace("car", quietly = TRUE)) {
-  lev_ct <- car::leveneTest(profit_margin_pct ~ factor(client_type), data = df_r)
-  cat(sprintf("Levene's Test (client type): p = %.4f\n", lev_ct$`Pr(>F)`[1]))
-}
+cat("=== Shapiro-Wilk Normality (Profit Margin by Client Type) ===\n")
+sw_ct <- df_r |>
+  filter(!is.na(profit_margin_pct), !is.na(client_type)) |>
+  group_by(client_type) |>
+  summarise(
+    n = n(),
+    W = if (n() >= 3) shapiro.test(profit_margin_pct)$statistic else NA_real_,
+    p_value = if (n() >= 3) shapiro.test(profit_margin_pct)$p.value else NA_real_,
+    normal = if (n() >= 3) ifelse(shapiro.test(profit_margin_pct)$p.value > 0.05,
+                                  "Yes", "No (prefer Kruskal-Wallis/Welch)") else "n < 3",
+    .groups = "drop"
+  )
+sw_ct |>
+  mutate(across(where(is.numeric), ~ round(., 4))) |>
+  kable(caption = "Shapiro-Wilk normality by client type") |>
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+lev_ct <- levene_test_r(df_r$profit_margin_pct, df_r$client_type)
+cat(sprintf("\nLevene's Test (client type): p = %.4f\n", lev_ct$`Pr(>F)`[1]))
 
 aov_ct <- aov(profit_margin_pct ~ client_type, data = df_r)
 cat("\n=== ANOVA: Profit Margin (%) by Client Type ===\n")
@@ -746,7 +796,7 @@ print(f"ANOVA by Client Type: F = {f2:.4f}, p = {p2:.4f}")
 
 ---
 
-## Technique 4 — Correlation Analysis
+## Correlation Analysis
 
 **Business justification.** Identifies which operational variables have the strongest linear relationship with profit margin and screens predictor pairs for collinearity before regression specification. A formal VIF check is run alongside the regression in §10 against the full design matrix including categorical dummies.
 
@@ -779,6 +829,24 @@ as.data.frame(cor_mat) |>
   rename(r_with_profit_margin = profit_margin_pct) |>
   kable(digits = 4, caption = "Correlation with Profit Margin (%)") |>
   kable_styling(full_width = FALSE)
+
+# Spearman robustness check (rank-based)
+cor_mat_s <- cor(corr_vars, method = "spearman")
+
+ggcorrplot(cor_mat_s, method = "circle", type = "lower",
+           lab = TRUE, lab_size = 3.5,
+           colors = c("#d73027", "white", "#1a9850"),
+           title = "Spearman Correlation — Engineering Project Variables",
+           ggtheme = theme_minimal(base_size = 10))
+
+tibble(
+  Variable = rownames(cor_mat)[rownames(cor_mat) != "profit_margin_pct"],
+  Pearson = round(cor_mat[rownames(cor_mat) != "profit_margin_pct", "profit_margin_pct"], 4),
+  Spearman = round(cor_mat_s[rownames(cor_mat_s) != "profit_margin_pct", "profit_margin_pct"], 4)
+) |>
+  arrange(desc(abs(Pearson))) |>
+  kable(caption = "Pearson vs Spearman — Correlation with Profit Margin") |>
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
 ```
 
 ## Python
@@ -802,6 +870,26 @@ plt.show()
 print("\nCorrelation with Profit Margin:")
 print(corr_mat[profit_col].drop(profit_col)
       .sort_values(key=abs, ascending=False).round(4))
+
+# Spearman robustness check
+corr_spear = corr_data.corr(method="spearman")
+
+fig, ax = plt.subplots(figsize=(8, 6))
+mask2 = np.triu(np.ones_like(corr_spear, dtype=bool))
+sns.heatmap(corr_spear, mask=mask2, annot=True, fmt=".2f",
+      cmap="RdYlGn", center=0, linewidths=0.5, ax=ax,
+      annot_kws={"size": 8})
+ax.set_title("Spearman Correlation — Engineering Project Variables")
+plt.tight_layout()
+plt.show()
+
+comp = pd.DataFrame({
+  "Pearson": corr_mat[profit_col].drop(profit_col).round(4),
+  "Spearman": corr_spear[profit_col].drop(profit_col).round(4),
+}).sort_values("Pearson", key=abs, ascending=False)
+
+print("\nPearson vs Spearman — Correlation with Profit Margin:")
+display(comp)
 ```
 
 :::
@@ -810,7 +898,7 @@ print(corr_mat[profit_col].drop(profit_col)
 
 ---
 
-## Technique 5 — Multiple Regression
+## Multiple Regression
 
 **Business justification.** Builds a predictive model for profit margin, enabling the finance team to flag at-risk projects early in the bidding or execution phase based on observable characteristics. The quadratic payment-delay term tests the threshold-effect concern flagged in §3.
 
