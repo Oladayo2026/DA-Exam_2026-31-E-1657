@@ -1,5 +1,5 @@
 ---
-title: "Project Profitability Analytics: Drivers of Profit Margin in MEP Construction Projects"
+title: "Project Profitability Analytics: Drivers of Profit Margin in  Construction Projects"
 author: "Oladayo Folorunso"
 date: today
 format:
@@ -137,9 +137,9 @@ df_py["overrun_flag"] = np.where(df_py["cost_overrun"] > 0, "Over Budget", "On/U
 
 ## 1. Executive Summary
 
-**Business problem:** Profit margin variability is the central financial risk for MEP construction project delivery. Understanding which project characteristics — type, client category, payment behaviour, procurement delays — drive margin erosion enables the finance function to price contracts more accurately and implement early-warning controls during execution.
+**Business problem:** Profit margin variability is the central financial risk for the construction project delivery. Understanding which project characteristics — type, client category, payment behaviour, procurement delays — drive margin erosion enables the finance function to price contracts more accurately and implement early-warning controls during execution.
 
-**Data collected:** 106 MEP construction projects executed between April 2016 and January 2026, drawn from the company's project management information system. Metrics include contract value, budgeted and actual cost, profit margin (%), payment delays, variation orders, procurement delays, and project completion percentage.
+**Data collected:** 106 construction projects executed between April 2016 and January 2026, drawn from the company's project management information system. Metrics include contract value, budgeted and actual cost, profit margin (%), payment delays, variation orders, procurement delays, and project completion percentage.
 
 **Key findings:**
 
@@ -154,10 +154,10 @@ df_py["overrun_flag"] = np.where(df_py["cost_overrun"] > 0, "Over Budget", "On/U
 ## 2. Professional Disclosure
 
 **Job title:** Head of Finance (CFO-designate)  
-**Organisation sector:** MEP construction and project delivery
+**Organisation sector:** Construction and project delivery
 
 ### Technique 1 — Exploratory Data Analysis
-As Head of Finance overseeing a 106-project MEP portfolio spanning April 2016 to January 2026, my most pressing strategic concern is margin volatility: why do some projects deliver healthy returns while others erode the company's financial position? Before any formal test, I need to understand the *shape* of that margin distribution — what percentage of projects are loss-making, which project type clusters exhibit the widest variance, and whether the most extreme negative margins are genuine contractual losses or accounting artefacts such as variation orders not yet captured in the cost system. EDA establishes this baseline and determines whether the distributional characteristics support parametric ANOVA and regression, or whether non-parametric alternatives are required. This mirrors the quarterly margin review I prepare for the MD, where the opening chart always presents the distribution of project-level performance before any cause-and-effect analysis.
+As Head of Finance overseeing a 106-project construction portfolio spanning April 2016 to January 2026, my most pressing strategic concern is margin volatility: why do some projects deliver healthy returns while others erode the company's financial position? Before any formal test, I need to understand the *shape* of that margin distribution — what percentage of projects are loss-making, which project type clusters exhibit the widest variance, and whether the most extreme negative margins are genuine contractual losses or accounting artefacts such as variation orders not yet captured in the cost system. EDA establishes this baseline and determines whether the distributional characteristics support parametric ANOVA and regression, or whether non-parametric alternatives are required. This mirrors the quarterly margin review I prepare for the MD, where the opening chart always presents the distribution of project-level performance before any cause-and-effect analysis.
 
 **Alternative considered:** Starting with a regression model on the raw data to identify margin drivers directly. Rejected because undetected data quality issues — inconsistent margin calculations across project managers, missing variation order entries, or incomplete cost records for in-progress projects — would silently bias coefficients and produce recommendations based on artefactual rather than genuine performance patterns.
 
@@ -189,7 +189,7 @@ The central analytical objective of this project is a project margin prediction 
 
 **Alternative considered:** Building a margin classification model (profitable vs. loss-making) using logistic regression rather than a continuous margin prediction. Rejected because the business question is not binary — it concerns the *degree* of margin performance — and a continuous OLS model provides more granular information for bid pricing, contingency quantification, and financial planning than a simple binary classifier.
 
-**Limitation:** The regression assumes that the marginal effect of each predictor is constant across the 10-year observation window. Given the construction materials cost shock of 2022–2023 and exchange rate pressures on imported MEP equipment, older project records may reduce the contemporary relevance of the estimated coefficients. A rolling 36-month window model would provide more actionable, period-relevant estimates for current-year bid pricing.
+**Limitation:** The regression assumes that the marginal effect of each predictor is constant across the 10-year observation window. Given the construction materials cost shock of 2022–2023 and exchange rate pressures on imported  equipment, older project records may reduce the contemporary relevance of the estimated coefficients. A rolling 36-month window model would provide more actionable, period-relevant estimates for current-year bid pricing.
 
 ---
 
@@ -199,7 +199,7 @@ The central analytical objective of this project is a project margin prediction 
 - **Dataset:** `MEP_construction_company_projs.csv` (106 records, 12 variables).
 - **Collection method:** Structured export from finance and project records.
 - **Period covered:** April 2016 to January 2026.
-- **Sample frame:** Active and completed MEP projects in the reporting window.
+- **Sample frame:** Active and completed projects in the reporting window.
 - **Sample adequacy:** Exceeds CS1 minimum and supports EDA, hypothesis testing, correlation, and regression with caution on subgroup sizes.
 - **Ethics:** Data is proprietary and used solely for academic analysis; sensitive identifiers should remain coded for publication.
 
@@ -221,7 +221,7 @@ df_r |>
          profit_margin_pct, payment_delays_days,
          procurement_delay_days, completion_pct) |>
   summary() |>
-  kable(caption = "Numeric variable summaries — MEP construction projects") |>
+  kable(caption = "Numeric variable summaries —  Construction projects") |>
   kable_styling(bootstrap_options = "striped", full_width = FALSE)
 ```
 
@@ -340,7 +340,7 @@ display(summary.sort_values("mean"))
 
 :::
 
-**Interpretation:** The profit margin distribution reveals the fundamental financial health of the MEP project portfolio. A right-skewed distribution with concentration near zero margin and a visible tail of loss-making projects indicates a portfolio under structural margin pressure — a signal that contract pricing, cost management, or payment terms require immediate governance attention. The breakdown by project type identifies whether loss-making exposure is concentrated in a particular segment (Infrastructure, Government contracts) or distributed uniformly across the portfolio. Projects where `actual_cost` exceeds `budgeted_cost` are flagged with the `overrun_flag` variable: a high overrun frequency within a project type is actionable evidence for pre-contract cost estimation reviews. Any extreme negative margin outliers should be investigated individually — they may reflect projects with unresolved variation order disputes that, if settled, would materially change the portfolio summary statistics.
+**Interpretation:** The profit margin distribution reveals the fundamental financial health of the construction project portfolio. A right-skewed distribution with concentration near zero margin and a visible tail of loss-making projects indicates a portfolio under structural margin pressure — a signal that contract pricing, cost management, or payment terms require immediate governance attention. The breakdown by project type identifies whether loss-making exposure is concentrated in a particular segment (Infrastructure, Government contracts) or distributed uniformly across the portfolio. Projects where `actual_cost` exceeds `budgeted_cost` are flagged with the `overrun_flag` variable: a high overrun frequency within a project type is actionable evidence for pre-contract cost estimation reviews. Any extreme negative margin outliers should be investigated individually — they may reflect projects with unresolved variation order disputes that, if settled, would materially change the portfolio summary statistics.
 
 ---
 
@@ -535,7 +535,7 @@ cor_mat <- cor(corr_vars, method = "pearson")
 ggcorrplot(cor_mat, method = "circle", type = "lower",
            lab = TRUE, lab_size = 3.5,
            colors = c("#d73027", "white", "#1a9850"),
-           title = "Pearson Correlation — MEP Project Variables",
+           title = "Pearson Correlation — Project Variables",
            ggtheme = theme_minimal(base_size = 10))
 ```
 
@@ -564,7 +564,7 @@ mask = np.triu(np.ones_like(corr_mat, dtype=bool))
 sns.heatmap(corr_mat, mask=mask, annot=True, fmt=".2f",
             cmap="RdYlGn", center=0, linewidths=0.5, ax=ax,
             annot_kws={"size": 8})
-ax.set_title("Pearson Correlation — MEP Project Variables")
+ax.set_title("Pearson Correlation — Project Variables")
 plt.tight_layout()
 plt.show()
 
@@ -671,7 +671,7 @@ print(f"\nAdj. R²: {model_py.rsquared_adj:.4f} | F p-value: {model_py.f_pvalue:
 
 ## 10. Integrated Findings
 
-Five analytical techniques converge on a coherent story about project profitability in MEP construction. EDA established the baseline: the portfolio contains a meaningful proportion of loss-making projects, and margin variability is not uniform across project types or client categories. Visualization confirmed that margin performance has shifted over the 10-year period and that payment delay days are visually associated with lower margin outcomes — the most commercially actionable finding in the dataset, pointing directly to receivables governance as the front-line financial control. Hypothesis testing determined whether margin differences by project type and client category are statistically credible, or merely the product of a small number of outlier contracts. Correlation analysis mapped the inter-relationships between delay variables, cost overrun, and margin before model specification — preventing multicollinearity artefacts from distorting the regression. Multiple regression then isolated the independent contribution of each predictor, producing a margin prediction model applicable at the bid stage to flag high-risk contracts before resources are committed.
+Five analytical techniques converge on a coherent story about project profitability in construction projects. EDA established the baseline: the portfolio contains a meaningful proportion of loss-making projects, and margin variability is not uniform across project types or client categories. Visualization confirmed that margin performance has shifted over the 10-year period and that payment delay days are visually associated with lower margin outcomes — the most commercially actionable finding in the dataset, pointing directly to receivables governance as the front-line financial control. Hypothesis testing determined whether margin differences by project type and client category are statistically credible, or merely the product of a small number of outlier contracts. Correlation analysis mapped the inter-relationships between delay variables, cost overrun, and margin before model specification — preventing multicollinearity artefacts from distorting the regression. Multiple regression then isolated the independent contribution of each predictor, producing a margin prediction model applicable at the bid stage to flag high-risk contracts before resources are committed.
 
 **Recommendation:** Introduce a project risk-screening gate at the bid-approval stage, anchored in the regression coefficients from this analysis. Contracts with Government clients, payment terms exceeding 60 days, or variation order exposure above the fleet average should require an automatic margin stress-test before approval sign-off. In parallel, target receivables governance as the highest-leverage operational action: both the correlation and regression evidence confirm that payment delay is the most controllable driver of margin erosion in the existing portfolio. A 30-day reduction in average payment delay across active contracts — achievable through tighter contractual payment milestone clauses and active collections management — would have a direct, quantifiable positive impact on annual profitability.
 
@@ -700,4 +700,4 @@ Five analytical techniques converge on a coherent story about project profitabil
 
 ## Appendix: AI Usage Statement
 
-GitHub Copilot (Microsoft) and ChatGPT (OpenAI) were used to accelerate document structuring, code templating in R and Python, and review of statistical workflow logic. All analytical decisions — technique selection, hypothesis formulation, regression model specification, and the interpretation of statistical outputs in terms of MEP project finance — were independently validated by the author against the actual model outputs generated from the company’s project management data. The commercial recommendations regarding bid-stage risk screening and payment governance policy reflect the author’s independent professional judgement as Head of Finance.
+GitHub Copilot (Microsoft) and ChatGPT (OpenAI) were used to accelerate document structuring, code templating in R and Python, and review of statistical workflow logic. All analytical decisions — technique selection, hypothesis formulation, regression model specification, and the interpretation of statistical outputs in terms of project finance — were independently validated by the author against the actual model outputs generated from the company’s project management data. The commercial recommendations regarding bid-stage risk screening and payment governance policy reflect the author’s independent professional judgement as Head of Finance.
